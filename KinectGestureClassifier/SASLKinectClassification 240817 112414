@@ -1,0 +1,14 @@
+Data containing directory set to: C:\Users\skoov\Desktop\CS HONOURS\HANDGR Project\Project Code\TrialData
+Train-Split ratio set to: 0.75
+
+Reading training set...
+Time elapsed in minutes: 0.0854265
+Valid gestures read: 186
+Invalid gestures not read: 0
+
+Preparing neural network...
+Training neural network...
+Setting layer sizes: 1875100, 26, 
+Using ANN_MLP::SIGMOID_SYM Activation function...
+Time elapsed in minutes: 0.524778
+

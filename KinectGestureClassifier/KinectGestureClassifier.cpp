@@ -52,7 +52,7 @@ struct ImageData
 	cv::Mat image;
 };
 
-cv::Mat getClassCode(const std::set<std::string>& classes, const std::string& classname) {
+cv::Mat getClassCode(const std::set<std::string>& classes, const std::string& classname, int& svmClass) {
 	cv::Mat code = cv::Mat::zeros(cv::Size((int)classes.size(), 1), CV_32F);
 	int index = 0;
 	for (auto it = classes.begin(); it != classes.end(); ++it)
@@ -61,6 +61,7 @@ cv::Mat getClassCode(const std::set<std::string>& classes, const std::string& cl
 		++index;
 	}
 	code.at<float>(index) = 1;
+	svmClass = index;
 	return code;
 };
 
@@ -118,14 +119,16 @@ int main(int argc, char** argv)
 	std::cout << "Preparing neural network..." << std::endl;
 	logfile << "Preparing neural network..." << endl;
 	cv::Mat trainSamples;
-	cv::Mat trainResponses;
+	cv::Mat trainResponses, trainResponsesSVM;
 	std::set<ImageData*> uniqueMetadata(imageMetadata.begin(), imageMetadata.end());
 	int noTrainingSamples = uniqueMetadata.size();
+	int svmClass = 0;
 	for (auto it = uniqueMetadata.begin(); it != uniqueMetadata.end();)
 	{
 		ImageData* data = *it;
 		trainSamples.push_back(data->image);
-		trainResponses.push_back(getClassCode(classes, data->classname));
+		trainResponses.push_back(getClassCode(classes, data->classname, svmClass));
+		trainResponsesSVM.push_back(svmClass);
 		delete *it; // clear memory
 		it++;
 	}
@@ -138,8 +141,11 @@ int main(int argc, char** argv)
 	int networkInputSize = 625*3; //trainSamples.cols;
 	int networkOutputSize = trainResponses.cols;
 	cout << networkInputSize << " " << networkOutputSize << endl;
+
+	// train neural network
 	cv::Ptr<cv::ml::ANN_MLP> mlp = cv::ml::ANN_MLP::create();
-	std::vector<int> layerSizes = { networkInputSize, networkInputSize/2, networkOutputSize };
+	mlp->setTermCriteria(TermCriteria(TermCriteria::MAX_ITER + TermCriteria::EPS, 1000, 0.0001));
+	std::vector<int> layerSizes = { networkInputSize, 100, networkOutputSize };
 
 	logfile << "Setting layer sizes: " << networkInputSize;
 	for (int i = 1; i < layerSizes.size(); ++i)
@@ -152,15 +158,26 @@ int main(int argc, char** argv)
 	logfile << "Using ANN_MLP::SIGMOID_SYM Activation function..." << endl;
 
 	// trainResponses.reshape(1, noTrainingSamples);
-	cout << trainResponses.rows << " " << trainResponses.cols << endl;
-	cout << trainSamples.rows << " " << trainSamples.cols << endl;
-	cout << noTrainingSamples << endl;
+	cout << "Training samples rows/cols: " << trainSamples.rows << " " << trainSamples.cols << endl;
 	trainSamples.convertTo(trainSamples, CV_32F);
+
+	cout << "Training responses rows/cols (MLP): " << trainResponses.rows << " " << trainResponses.cols << endl;
+	cout << "Training responses rows/cols (SVM): " << trainResponsesSVM.rows << " " << trainResponsesSVM.cols << endl;
+	cout << "Number of training samples: " << noTrainingSamples << endl;
 	mlp->train(trainSamples, cv::ml::ROW_SAMPLE, trainResponses);
 	
 	std::cout << "Time elapsed in minutes: " << ((double)cv::getTickCount() - start) / cv::getTickFrequency() / 60.0 << std::endl;
 	logfile << "Time elapsed in minutes: " << ((double)cv::getTickCount() - start) / cv::getTickFrequency() / 60.0 << std::endl;
 	logfile << endl;
+
+	// setup and train SVM
+	Ptr<ml::SVM> svm = ml::SVM::create();
+	svm->setType(ml::SVM::C_SVC);
+	svm->setKernel(ml::SVM::POLY);
+	svm->setDegree(3);
+	Ptr<ml::TrainData> td = ml::TrainData::create(trainSamples, ml::ROW_SAMPLE, trainResponsesSVM);
+	svm->trainAuto(td);
+	cout << "Trained SVM" << endl << endl;
 
 	// Clear memory now 
 	trainSamples.release();
@@ -192,18 +209,20 @@ int main(int argc, char** argv)
 	std::cout << "Predicting on test set..." << std::endl;
 	logfile << "Predicting on test set..." << std::endl;
 	start = cv::getTickCount();
-	cv::Mat testOutput;
-	mlp->predict(testSamples, testOutput);
+	cv::Mat mlpTestOutput, svmTestOutput;
+	mlp->predict(testSamples, mlpTestOutput);
 	std::cout << "Time elapsed in minutes: " << ((double)cv::getTickCount() - start) / cv::getTickFrequency() / 60.0 << std::endl;
 	logfile << "Time elapsed in minutes: " << ((double)cv::getTickCount() - start) / cv::getTickFrequency() / 60.0 << std::endl;
 	logfile << endl;
+
+	svm->predict(testSamples, svmTestOutput);
 	testSamples.release();
 
-	//calculate confusion matrix
+	//calculate confusion matrix for mlp
 	std::vector<std::vector<int> > confusionMatrix(26, std::vector<int>(26));
-	for (int i = 0; i < testOutput.rows; i++)
+	for (int i = 0; i < mlpTestOutput.rows; i++)
 	{
-		int predictedClass = getPredictedClass(testOutput.row(i));
+		int predictedClass = getPredictedClass(mlpTestOutput.row(i));
 		int expectedClass = testOutputExpected.at(i);
 		confusionMatrix[expectedClass][predictedClass]++;
 	}
@@ -218,7 +237,7 @@ int main(int argc, char** argv)
 		}
 	}
 
-	logfile << "Confusion matrix: " << endl;
+	logfile << "Confusion matrix - MLP: " << endl;
 	//print confusion matrix
 	for (auto it = classes.begin(); it != classes.end(); ++it)
 	{
@@ -239,9 +258,54 @@ int main(int argc, char** argv)
 	}
 	logfile << endl;
 
-	cout << "Classifier accuracy rate: " << hits * 100 / (float)total << "%" << endl;
-	logfile << "Classifier accuracy rate: " << hits * 100 / (float)total << "%" << endl << endl;
+	cout << "Classifier accuracy rate - MLP: " << hits * 100 / (float)total << "%" << endl;
+	logfile << "Classifier accuracy rate - MLP: " << hits * 100 / (float)total << "%" << endl << endl;
+	//logfile.close();
+
+
+	//SVM:
+	//calculate confusion matrix for svm
+	for (int i = 0; i < svmTestOutput.rows; i++)
+	{
+		int predictedClass = getPredictedClass(svmTestOutput.row(i));
+		int expectedClass = testOutputExpected.at(i);
+		confusionMatrix[expectedClass][predictedClass]++;
+	}
+	hits = 0, total = 0;
+	for (size_t i = 0; i < confusionMatrix.size(); i++)
+	{
+		for (size_t j = 0; j < confusionMatrix.at(i).size(); j++)
+		{
+			if (i == j) hits += confusionMatrix.at(i).at(j);
+			total += confusionMatrix.at(i).at(j);
+		}
+	}
+
+	logfile << "Confusion matrix - SVM: " << endl;
+	//print confusion matrix
+	for (auto it = classes.begin(); it != classes.end(); ++it)
+	{
+		std::cout << *it << " ";
+		logfile << *it << " ";
+	}
+	std::cout << std::endl;
+	logfile << endl;
+	for (size_t i = 0; i < confusionMatrix.size(); i++)
+	{
+		for (size_t j = 0; j < confusionMatrix[i].size(); j++)
+		{
+			std::cout << confusionMatrix[i][j] << " ";
+			logfile << confusionMatrix[i][j] << " ";
+		}
+		std::cout << std::endl;
+		logfile << endl;
+	}
+	logfile << endl;
+
+	cout << "Classifier accuracy rate - SVM: " << hits * 100 / (float)total << "%" << endl;
+	logfile << "Classifier accuracy rate - SVM: " << hits * 100 / (float)total << "%" << endl << endl;
 	logfile.close();
+
 
 	//Processing individual frame
 
@@ -304,13 +368,12 @@ bool getFirstValidFrame(int& valid, int& invalid, const string& directory, strin
 					validframe = DataFrame::resizeKeepAspectRatio(frame, 25, 25);
 					return true;
 				}
-
 			}
 		}
-		cout << "Invalid gesture [" + directory + "]" << endl;
-		++invalid;
-		return false;
 	}
+	cout << "Invalid gesture [" + directory + "]" << endl;
+	++invalid;
+	return false;
 }
 
 string getClassName(string filename)
